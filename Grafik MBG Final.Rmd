@@ -1,0 +1,180 @@
+---
+title: "Grafik MBG 2"
+author: "Muhammad Jodi At-Takbir"
+date: "2025-12-07"
+output: html_document
+---
+
+
+# Grafik
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+# 1. Baca data
+data <- read_excel("C:/Users/jodia/Downloads/Grafik Nasional.xlsx",
+                   col_names = TRUE, sheet = "Beras") %>%
+  mutate(
+    Konsumsi = as.numeric(gsub(",", "", Konsumsi)),
+    Produksi = as.numeric(gsub(",", "", Produksi)),
+    Tahun = as.numeric(Tahun)
+  )
+
+# 2. Long format
+data_long <- data %>%
+  pivot_longer(cols = c(Konsumsi, Produksi),
+               names_to = "Variabel",
+               values_to = "Nilai")
+
+# 3. Pisahkan aktual & proyeksi
+data_solid <- data_long %>% filter(Tahun <= 2024)
+data_dash  <- data_long %>% filter(Tahun >= 2025)
+data_join  <- data_long %>% filter(Tahun %in% c(2024, 2025))
+
+# 4. Plot final
+ggplot() +
+  geom_line(data = data_solid,
+            aes(Tahun, Nilai, color = Variabel),
+            linewidth = 0.9) +
+  geom_line(data = data_join,
+            aes(Tahun, Nilai, color = Variabel),
+            linewidth = 0.9) +
+  geom_line(data = data_dash,
+            aes(Tahun, Nilai, color = Variabel),
+            linewidth = 0.9,
+            linetype = "42") +
+  geom_point(data = data_solid,
+             aes(Tahun, Nilai, color = Variabel),
+             size = 1.6) +
+
+  scale_color_manual(values = c("Konsumsi" = "red",
+                                "Produksi" = "blue"),
+                     name = "Keterangan") +
+
+  scale_x_continuous(breaks = 2018:2030, labels = 2018:2030) +
+
+  scale_y_continuous(
+    labels = comma_format(accuracy = 1),  # angka fixed rapi
+    n.breaks = 10
+  ) +
+
+  labs(
+    title = "Grafik Konsumsi vs Produksi Beras Nasional (2018–2030)",
+    x = "Tahun",
+    y = "Ton/Tahun"
+  ) +
+
+  theme_minimal(base_size = 15) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_text(face = "bold")
+  )
+
+
+```
+
+
+# Generate ke excel
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(stringr)
+
+# Lokasi file
+file_path <- "C:/Users/jodia/Downloads/Grafik Nasional.xlsx"
+
+# Ambil nama semua sheet
+sheets <- excel_sheets(file_path)
+
+# Buat folder penyimpanan jika belum ada
+dir.create("Grafik_Nasional", showWarnings = FALSE)
+
+# Loop semua sheet
+for (sheet in sheets) {
+
+  data <- read_excel(file_path, sheet = sheet, col_names = TRUE) %>%
+    mutate(
+      Konsumsi = as.numeric(gsub(",", "", Konsumsi)),
+      Produksi = as.numeric(gsub(",", "", Produksi)),
+      Tahun = as.numeric(Tahun)
+    )
+
+  data_long <- data %>%
+    pivot_longer(cols = c(Konsumsi, Produksi),
+                 names_to = "Variabel",
+                 values_to = "Nilai")
+
+  # Pisahkan aktual & proyeksi
+  data_solid <- data_long %>% filter(Tahun <= 2024)
+  data_dash  <- data_long %>% filter(Tahun >= 2025)
+  data_join  <- data_long %>% filter(Tahun %in% c(2024, 2025))
+
+  # Buat grafik
+  g <- ggplot() +
+    geom_line(data = data_solid,
+              aes(Tahun, Nilai, color = Variabel),
+              linewidth = 0.9) +
+    geom_line(data = data_join,
+              aes(Tahun, Nilai, color = Variabel),
+              linewidth = 0.9) +
+    geom_line(data = data_dash,
+              aes(Tahun, Nilai, color = Variabel),
+              linewidth = 0.9,
+              linetype = "42") +
+    geom_point(data = data_solid,
+               aes(Tahun, Nilai, color = Variabel),
+               size = 1.6) +
+
+    scale_color_manual(values = c("Konsumsi" = "red",
+                                  "Produksi" = "blue"),
+                       name = "Keterangan") +
+
+    scale_x_continuous(breaks = 2018:2030,
+                       labels = 2018:2030) +
+    scale_y_continuous(labels = comma_format(accuracy = 1),
+                       n.breaks = 10) +
+
+    labs(
+      title = paste("Grafik Konsumsi vs Produksi", sheet, "(2018–2030)"),
+      x = "Tahun",
+      y = "Ton/Tahun"
+    ) +
+
+    theme_minimal(base_size = 15) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.title = element_text(face = "bold")
+    )
+
+  # Nama file aman (hapus karakter ilegal)
+  safe_name <- gsub("[/:*?\"<>|\\\\]", "_", sheet)
+
+  # Simpan
+  ggsave(
+    filename = paste0("Grafik_Nasional/", safe_name, ".png"),
+    plot = g, width = 10, height = 5
+  )
+
+  cat("✓ Grafik selesai:", sheet, "\n")
+}
+
+cat("\n🎉 Semua grafik berhasil dibuat dan disimpan di folder: Grafik_Nasional\n")
+
+```
+
+
+```{r}
+browseURL("Grafik_Nasional")
+
+```
+

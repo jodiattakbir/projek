@@ -1,0 +1,353 @@
+---
+title: "Peta Sebaran Proyeksi Gap Pangan & Kebutuhan MBG (2024-2030)"
+subtitle: "Visualisasi Geospasial Surplus, Defisit, dan Kebutuhan Komoditas"
+author: "Nabil Naufal"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    code_folding: show
+    fig_width: 16
+    fig_height: 9
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 1\. Persiapan Library & Fungsi Standardisasi
+
+```{r prep}
+library(tidyverse)
+library(readxl)
+library(sf)      # Wajib untuk peta
+library(scales)  # Untuk format angka di legend
+library(ggplot2) # Wajib untuk visualisasi
+
+# --- FUNGSI STANDARDISASI NAMA PROVINSI ---
+# Ini krusial agar nama di Excel cocok dengan nama di Peta (SHP)
+fix_nama_provinsi <- function(nama_raw) {
+  if(all(is.na(nama_raw))) return(nama_raw)
+  nama_raw %>%
+    str_to_upper() %>% str_trim() %>% 
+    str_remove("^PROVINSI ") %>%
+    str_replace_all("KALIMANTAN BERAT", "KALIMANTAN BARAT") %>% 
+    str_replace_all("KEPULAUAN", "KEP.") %>%
+    str_replace_all("DAERAH ISTIMEWA", "DI") %>%
+    str_replace_all("DKI ", "") %>% 
+    str_replace_all("^JAKARTA", "DKI JAKARTA") %>%
+    str_replace_all("BANGKA BELITUNG", "KEP. BANGKA BELITUNG") %>%
+    str_replace_all("PAPUA BARAT DAYA", "PAPUA BARAT DAYA") 
+}
+```
+
+## 2\. Load Shapefile (Peta Dasar)
+
+```{r load_shp}
+path_shp <- "C:/Users/jodia/Downloads/versi2/versi2/batas_provinsi_final.shp"
+
+if(!file.exists(path_shp)) stop("❌ File SHP tidak ditemukan di folder 'versi2'! Cek path folder.")
+
+# Baca SHP
+shp_indo <- st_read(path_shp, quiet = TRUE)
+
+# Deteksi otomatis kolom nama provinsi (ambil kolom pertama)
+nama_col_prov <- names(shp_indo)[1] 
+
+# Bersihkan nama provinsi di SHP agar match dengan Excel
+shp_clean <- shp_indo %>%
+  mutate(Provinsi_Join = fix_nama_provinsi(!!sym(nama_col_prov))) %>%
+  select(Provinsi_Join, geometry) 
+
+cat(paste("✅ SHP Berhasil dimuat. Menggunakan kolom nama:", nama_col_prov))
+```
+
+## 3\. Fungsi Pembacaan Data Excel (Disesuaikan untuk Struktur Header yang Berbeda)
+
+Fungsi ini sekarang lebih *robust* dan akan mengabaikan Baris 1 (`skip_rows = 1`) jika *header* ada di Baris 2, atau `skip_rows = 0` jika *header* ada di Baris 1.
+
+```{r read_excel_func}
+read_data_pangan <- function(path, sheet_name, skip_rows) {
+  
+  # Baca data dengan header (col_names = TRUE) dimulai dari baris yang ditentukan (skip_rows)
+  raw_data <- tryCatch({
+    read_excel(path, sheet = sheet_name, skip = skip_rows, col_types = "text", .name_repair = "unique_quiet")
+  }, error = function(e) { 
+    cat(paste("ERROR reading sheet", sheet_name, ":", e$message, "\n")); 
+    return(NULL)
+  })
+  
+  if(is.null(raw_data) || ncol(raw_data) < 2) return(NULL)
+  
+  # Ambil index kolom Provinsi dan Tahun 2024 s/d 2030
+  idx_prov <- grep("Provinsi", names(raw_data), ignore.case = TRUE)[1]
+  idx_start <- grep("2024", names(raw_data))[1]
+  
+  if (is.na(idx_prov)) { idx_prov <- 1 }
+  
+  if (is.na(idx_start)) {
+    cat(paste0("⚠️ Warning: Kolom '2024' tidak ditemukan di sheet ", sheet_name, ". Menggunakan kolom data dari index 2.\n"))
+    idx_cols <- 2:min(ncol(raw_data), 8) # Asumsi Kolom 2 sampai Kolom 8 adalah data
+  } else {
+    idx_cols <- idx_start:(idx_start + 6)
+    if(max(idx_cols) > ncol(raw_data)) { idx_cols <- idx_start:ncol(raw_data) }
+  }
+  
+  df_temp <- raw_data[, c(idx_prov, idx_cols)]
+  
+  # Rename Kolom
+  tahun_labels <- as.character(2024:(2023 + length(idx_cols)))
+  colnames(df_temp) <- c("Provinsi_Raw", tahun_labels)
+  
+  # PIVOT dan Cleaning
+  df_long <- df_temp %>%
+    # Filter Baris: Pastikan Kolom Provinsi tidak kosong dan bukan total
+    filter(!is.na(Provinsi_Raw) & Provinsi_Raw != "") %>% 
+    mutate(Provinsi_Join = fix_nama_provinsi(Provinsi_Raw)) %>%
+    filter(!str_detect(Provinsi_Join, "TOTAL|JUMLAH|INDONESIA")) %>% 
+    pivot_longer(cols = -c(Provinsi_Raw, Provinsi_Join), names_to = "Tahun_Raw", values_to = "Nilai_Data_Text") %>%
+    mutate(
+      # KONVERSI BERSIH: Hapus karakter non-angka/non-minus/non-titik dan konversi ke numerik
+      Nilai_Data = suppressWarnings(as.numeric(gsub("[^0-9.-]", "", Nilai_Data_Text))), 
+      Tahun = paste("Tahun", Tahun_Raw)  
+    ) %>%
+    select(-Nilai_Data_Text) 
+  
+  # Cek jika ada provinsi yang hilang
+  n_prov_found <- length(unique(df_long$Provinsi_Join))
+  if (n_prov_found < 38) {
+      cat(paste("⚠️ Warning: Hanya ditemukan", n_prov_found, "provinsi di sheet", sheet_name, ". Cek kembali baris di Excel.\n"))
+  }
+  
+  return(df_long)
+}
+```
+
+## 4\. Visualisasi Gap (Aktual 2024 dan Proyeksi 2025-2030)
+
+> **Keterangan:** File GAP memiliki *header* yang sudah bersih di Baris 1. Oleh karena itu, kita menggunakan `skip_rows = 0`.
+
+```{r loop_viz_gap, results='asis', fig.width=16, fig.height=8}
+# --- PERSIAPAN OUTPUT FOLDER & SUBFOLDER ---
+folder_output_gap_base <- "Output_Peta_Gap"
+if(!dir.exists(folder_output_gap_base)) { dir.create(folder_output_gap_base) }
+dir_2024 <- paste0(folder_output_gap_base, "/Aktual_2024")
+dir_proj <- paste0(folder_output_gap_base, "/Proyeksi_2025_2030")
+if(!dir.exists(dir_2024)) { dir.create(dir_2024) }
+if(!dir.exists(dir_proj)) { dir.create(dir_proj) }
+
+path_excel_gap <- "C:/Users/jodia/Downloads/Kebutuhan Susu dan Beras.xlsx"
+sheets_gap <- excel_sheets(path_excel_gap)
+
+# LOOPING PER KOMODITAS
+for(komoditas in sheets_gap) {
+  
+  # 1. BACA DATA LENGKAP (2024-2030) -- MENGGUNAKAN skip_rows = 0
+  df_long <- read_data_pangan(path_excel_gap, komoditas, skip_rows = 0)
+  if(is.null(df_long)) next
+  
+  # 2. Split Data
+  df_2024 <- df_long %>% filter(Tahun_Raw == "2024")
+  df_proyeksi <- df_long %>% filter(Tahun_Raw != "2024")
+  
+  # 3. Tentukan Limit Warna Maksimum (dari semua data untuk skala konsisten)
+  limit_val <- max(abs(df_long$Nilai_Data), na.rm = TRUE)
+  if(limit_val == 0 || is.na(limit_val) || !is.finite(limit_val)) limit_val <- 1
+  pretty_breaks <- scales::breaks_pretty(n = 5)(c(-limit_val, limit_val))
+  final_limit <- max(abs(pretty_breaks))
+  
+  # --- VISUALISASI 1: 2024 AKTUAL (STANDALONE) ---
+  cat(paste0("\n### 🗺️ Peta Gap Aktual 2024: ", komoditas, "\n"))
+  map_data_2024 <- shp_clean %>% left_join(df_2024, by = "Provinsi_Join")
+  
+  p_gap_2024 <- ggplot(data = map_data_2024) +
+    geom_sf(aes(fill = Nilai_Data), color = "gray60", size = 0.1) +
+    
+    scale_fill_gradient2(
+      low = "red", mid = "#FFFFFF", high = "blue", # Merah=Defisit, Biru=Surplus
+      midpoint = 0,
+      limits = c(-final_limit, final_limit),
+      na.value = "gray40", 
+      labels = comma,       
+      name = "Gap (Ton)",
+      guide = guide_colorbar(barwidth = 15, barheight = 0.8, title.position = "top", title.hjust = 0.5, frame.colour = "black", ticks.colour = "black")
+    ) +
+    
+    theme_void() +
+    labs(
+      title = paste("Peta Proyeksi Kebutuhan MBG -", komoditas),
+      subtitle = "Warna Lebih Gelap = Kebutuhan Lebih Tinggi (Tahun 2025 s/d 2030"
+    ) +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5, margin = margin(b = 10)),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 20)),
+      legend.position = "bottom", legend.text = element_text(size = 9),
+      legend.title = element_text(size = 12, face="bold")
+    )
+  
+  print(p_gap_2024)
+  
+  # Save
+  nama_file_clean <- str_replace_all(komoditas, "[^a-zA-Z0-9]", "_")
+  full_path_2024 <- paste0(dir_2024, "/Peta_Gap_2024_", nama_file_clean, ".png")
+  ggsave(filename = full_path_2024, plot = p_gap_2024, width = 10, height = 8, dpi = 400, bg = "white")
+  cat(paste0("\n✅ **Tersimpan (Aktual 2024):** `", full_path_2024, "`\n"))
+  
+  # --- VISUALISASI 2: 2025-2030 PROYEKSI (FACET) ---
+  if(nrow(df_proyeksi) > 0) {
+    cat(paste0("\n### 🗺️ Peta Gap Proyeksi 2025-2030: ", komoditas, "\n"))
+    map_data_proyeksi <- shp_clean %>% left_join(df_proyeksi, by = "Provinsi_Join")
+    
+    p_gap_proyeksi <- ggplot(data = map_data_proyeksi) +
+      geom_sf(aes(fill = Nilai_Data), color = "gray60", size = 0.1) +
+      
+      scale_fill_gradient2(
+        low = "red", mid = "#FFFFFF", high = "blue", 
+        midpoint = 0,
+        limits = c(-final_limit, final_limit),
+        na.value = "gray40", 
+        labels = comma,       
+        name = "Gap (Ton)",
+        guide = guide_colorbar(barwidth = 25, barheight = 1, title.position = "top", title.hjust = 0.5, frame.colour = "black", ticks.colour = "black")
+      ) +
+      
+      facet_wrap(~Tahun, ncol = 3) +
+      
+      theme_void() +
+      labs(
+        title = paste("Peta Proyeksi Kebutuhan MBG -", komoditas),
+        subtitle = "Warna Lebih Gelap = Kebutuhan Lebih Tinggi (Tahun 2025 s/d 2030)"
+      ) +
+      theme(
+        plot.title = element_text(size = 20, face = "bold", hjust = 0.5, margin = margin(b = 10)),
+        plot.subtitle = element_text(size = 14, hjust = 0.5, margin = margin(b = 20)),
+        legend.position = "bottom", legend.text = element_text(size = 9),
+        legend.title = element_text(size = 12, face="bold"),
+        strip.text = element_text(size = 14, face = "bold", margin = margin(b = 5))
+      )
+    
+    print(p_gap_proyeksi)
+    
+    # Save
+    full_path_proj <- paste0(dir_proj, "/Peta_Gap_Proyeksi_", nama_file_clean, ".png")
+    ggsave(filename = full_path_proj, plot = p_gap_proyeksi, width = 16, height = 8, dpi = 400, bg = "white")
+    cat(paste0("\n✅ **Tersimpan (Proyeksi 2025-2030):** `", full_path_proj, "`\n"))
+  }
+  cat("\n---\n")
+}
+```
+
+## 5\. Visualisasi Kebutuhan MBG (Aktual 2024 dan Proyeksi 2025-2030)
+
+> **Keterangan:** File KEBUTUHAN memiliki *header* yang valid di Baris 2 Excel. Oleh karena itu, kita menggunakan `skip_rows = 1` untuk melewati Baris 1 yang berisi *metadata*.
+
+```{r loop_viz_kebutuhan, results='asis', fig.width=16, fig.height=8}
+# --- PERSIAPAN OUTPUT FOLDER & SUBFOLDER ---
+folder_output_kebutuhan_base <- "Output_Peta_Kebutuhan"
+if(!dir.exists(folder_output_kebutuhan_base)) { dir.create(folder_output_kebutuhan_base) }
+dir_2024_k <- paste0(folder_output_kebutuhan_base, "/Aktual_2024")
+dir_proj_k <- paste0(folder_output_kebutuhan_base, "/Proyeksi_2025_2030")
+if(!dir.exists(dir_2024_k)) { dir.create(dir_2024_k) }
+if(!dir.exists(dir_proj_k)) { dir.create(dir_proj_k) }
+
+path_excel_kebutuhan <- "C:/Users/jodia/Downloads/Kebutuhan Susu dan Beras.xlsx"
+sheets_kebutuhan <- excel_sheets(path_excel_kebutuhan)
+
+# LOOPING PER KOMODITAS
+for(komoditas in sheets_kebutuhan) {
+  
+  # 1. BACA DATA LENGKAP (2024-2030) -- MENGGUNAKAN skip_rows = 1
+  df_long <- read_data_pangan(path_excel_kebutuhan, komoditas, skip_rows = 0)
+  if(is.null(df_long)) next
+  
+  # 2. Split Data
+  df_2024 <- df_long %>% filter(Tahun_Raw == "2024")
+  df_proyeksi <- df_long %>% filter(Tahun_Raw != "2024")
+  
+  # 3. Tentukan Limit Warna Maksimum (dari semua data untuk skala konsisten)
+  max_val <- max(df_long$Nilai_Data, na.rm = TRUE)
+  if(!is.finite(max_val) || max_val == 0) max_val <- 1
+  
+  # --- VISUALISASI 1: 2024 AKTUAL (STANDALONE) ---
+  cat(paste0("\n### 🗺️ Peta Kebutuhan Aktual 2024: ", komoditas, "\n"))
+  map_data_2024 <- shp_clean %>% left_join(df_2024, by = "Provinsi_Join")
+  
+  p_kebutuhan_2024 <- ggplot(data = map_data_2024) +
+    geom_sf(aes(fill = Nilai_Data), color = "gray60", size = 0.1) +
+    
+    scale_fill_gradient(
+      low = "#FFF5F0", high = "#CB181D", # Skala Merah Sequential
+      na.value = "gray90", 
+      labels = comma,       
+      name = "Kebutuhan (Ton)",
+      limits = c(0, max_val),
+      guide = guide_colorbar(barwidth = 15, barheight = 0.8, title.position = "top", title.hjust = 0.5, frame.colour = "black", ticks.colour = "black")
+    ) +
+    
+    theme_void() +
+    labs(
+      title = paste("Peta Kebutuhan Aktual Tahun 2024 -", komoditas),
+      subtitle = "Warna Lebih Gelap = Kebutuhan Lebih Tinggi"
+    ) +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5, margin = margin(b = 10)),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 20)),
+      legend.position = "bottom", legend.text = element_text(size = 9),
+      legend.title = element_text(size = 12, face="bold")
+    )
+  
+  print(p_kebutuhan_2024)
+  
+  # Save
+  nama_file_clean <- str_replace_all(komoditas, "[^a-zA-Z0-9]", "_")
+  full_path_2024 <- paste0(dir_2024_k, "/Peta_Kebutuhan_2024_", nama_file_clean, ".png")
+  ggsave(filename = full_path_2024, plot = p_kebutuhan_2024, width = 10, height = 8, dpi = 400, bg = "white")
+  cat(paste0("\n✅ **Tersimpan (Aktual 2024):** `", full_path_2024, "`\n"))
+  
+  # --- VISUALISASI 2: 2025-2030 PROYEKSI (FACET) ---
+  if(nrow(df_proyeksi) > 0) {
+    cat(paste0("\n### 🗺️ Peta Kebutuhan Proyeksi 2025-2030: ", komoditas, "\n"))
+    map_data_proyeksi <- shp_clean %>% left_join(df_proyeksi, by = "Provinsi_Join")
+    
+    p_kebutuhan_proyeksi <- ggplot(data = map_data_proyeksi) +
+      geom_sf(aes(fill = Nilai_Data), color = "gray60", size = 0.1) +
+      
+      scale_fill_gradient(
+        low = "#FFF5F0", high = "#CB181D", # Skala Merah Sequential
+        na.value = "gray90", 
+        labels = comma,       
+        name = "Kebutuhan (Ton)",
+        limits = c(0, max_val),
+        guide = guide_colorbar(barwidth = 25, barheight = 1, title.position = "top", title.hjust = 0.5, frame.colour = "black", ticks.colour = "black")
+      ) +
+      
+      facet_wrap(~Tahun, ncol = 3) +
+      
+      theme_void() +
+      labs(
+        title = paste("Peta Proyeksi Kebutuhan MBG -", komoditas),
+        subtitle = "Warna Lebih Gelap = Kebutuhan Lebih Tinggi (Tahun 2025 s/d 2030)"
+      ) +
+      theme(
+        plot.title = element_text(size = 20, face = "bold", hjust = 0.5, margin = margin(b = 10)),
+        plot.subtitle = element_text(size = 14, hjust = 0.5, margin = margin(b = 20)),
+        legend.position = "bottom", legend.text = element_text(size = 9),
+        legend.title = element_text(size = 12, face="bold"),
+        strip.text = element_text(size = 14, face = "bold", margin = margin(b = 5))
+      )
+    
+    print(p_kebutuhan_proyeksi)
+    
+    # Save
+    full_path_proj <- paste0(dir_proj_k, "/Peta_Kebutuhan_Proyeksi_", nama_file_clean, ".png")
+    ggsave(filename = full_path_proj, plot = p_kebutuhan_proyeksi, width = 16, height = 8, dpi = 400, bg = "white")
+    cat(paste0("\n✅ **Tersimpan (Proyeksi 2025-2030):** `", full_path_proj, "`\n"))
+  }
+  cat("\n---\n")
+}
+```
+
+
+
+
